@@ -54,13 +54,14 @@ public:
 	bool debugDisplayReflection = false;
 	bool debugDisplayRefraction = false;
 	bool displayWaterPlane = true;
-	bool renderShadows = false;
+	bool renderShadows = true;
 	bool renderTrees = true;
 	bool renderGrass = true;
 	bool renderTerrain = true;
 	bool fixFrustum = false;
 	bool hasExtMemoryBudget = false;
 	bool stickToTerrain = false;
+	bool waterBlending = true;
 
 	struct MemoryBudget {
 		int heapCount;
@@ -78,7 +79,6 @@ public:
 
 	struct TreeModelInfo {
 		std::string name;
-		float imposterScale = 1.0f;
 		struct Models {
 			vkglTF::Model model;
 			vkglTF::Model imposter;
@@ -87,7 +87,6 @@ public:
 	int selectedTreeType = 0;
 	int selectedGrassType = 0;
 
-	const std::vector<float> imposterScales = { 0.65f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 	const std::vector<std::string> treeTypes = {
 		"spruce", "fir", "birch", "pine", "tropical", "tropical2", "palm", "coconut_palm"
 	};
@@ -163,8 +162,8 @@ public:
 
 	struct UniformDataParams {
 		uint32_t shadows = 0;
-		uint32_t fog = 1;
-		float waterAlpha = 2048.0;
+		uint32_t smoothCoastLine = 1;
+		float waterAlpha = 512.0f;
 		uint32_t shadowPCF = 1;
 		glm::vec4 fogColor;
 		glm::vec4 waterColor;
@@ -295,6 +294,8 @@ public:
 		Timing drawBatchUpdate;
 		Timing drawBatchCpu;
 		Timing drawBatchUpload;
+		Timing cbBuild;
+		Timing uniformUpdate;
 	} profiling;
 
 	struct FileList {
@@ -305,7 +306,7 @@ public:
 	int32_t terrainSetIndex = 0;
 
 	inline float goldNoise(glm::vec2 xy, float seed) {
-		const float PHI = 1.61803398874989484820459;
+		const float PHI = 1.61803398874989484820459f;
 		float ip;
 		return modf(tan(glm::distance(xy * PHI, xy) * seed) * xy.x, &ip);
 	}
@@ -390,7 +391,7 @@ public:
 								}
 								idImpostors[idxImpostor].pos = object.worldpos;
 								idImpostors[idxImpostor].rotation = object.rotation;
-								idImpostors[idxImpostor].scale = object.scale * treeModelInfo[selectedTreeType].imposterScale;
+								idImpostors[idxImpostor].scale = object.scale;
 								idImpostors[idxImpostor].color = object.color;
 								// Fade in with terrain chunk
 								idImpostors[idxImpostor].color.a = terrainChunk->alpha;
@@ -833,11 +834,11 @@ public:
 			}
 		}
 
+		vkCmdSetCullMode(cb->handle, VK_CULL_MODE_NONE);
+		const VkDeviceSize offsets[1] = { 0 };
+
 		// Trees
 		if ((renderTrees) && (drawType != SceneDrawType::sceneDrawTypeRefract) && (drawBatches.trees.instanceBuffers[currentFrameIndex].buffer != VK_NULL_HANDLE) && (drawBatches.trees.instanceBuffers[currentFrameIndex].elements > 0)) {
-			vkCmdSetCullMode(cb->handle, VK_CULL_MODE_NONE);
-			const VkDeviceSize offsets[1] = { 0 };
-
 			cb->bindPipeline(offscreen ? pipelines.treeOffscreen : pipelines.tree);
 			cb->bindDescriptorSets(pipelineLayouts.tree, { currentFrame.uniformBuffers.shared.descriptorSet }, 0);
 			cb->bindDescriptorSets(pipelineLayouts.tree, { currentFrame.uniformBuffers.params.descriptorSet, descriptorSets.shadowCascades, currentFrame.uniformBuffers.CSM.descriptorSet }, 2);
@@ -872,8 +873,6 @@ public:
 
 		// Grass
 		if (renderGrass && (drawType != SceneDrawType::sceneDrawTypeRefract) && (drawBatches.grass.instanceBuffers[currentFrameIndex].buffer != VK_NULL_HANDLE) && (drawBatches.grass.instanceBuffers[currentFrameIndex].elements > 0)) {
-			vkCmdSetCullMode(cb->handle, VK_CULL_MODE_NONE);
-			const VkDeviceSize offsets[1] = { 0 };
 
 			std::vector<DrawBatch*> batches = { &drawBatches.grass };
 			for (auto& drawBatch : batches) {
@@ -1099,10 +1098,6 @@ public:
 		drawShadowCasters(cb);
 	}
 
-	/*
-		Sample
-	*/
-
 	void loadSkySphere(const std::string filename)
 	{
 		if (textures.skySphere.image != VK_NULL_HANDLE) {
@@ -1137,7 +1132,6 @@ public:
 	{
 		models.skysphere.loadFromFile(getAssetPath() + "scenes/geosphere.gltf", vulkanDevice, queue);
 		models.plane.loadFromFile(getAssetPath() + "scenes/plane.gltf", vulkanDevice, queue);
-//		models.grass.loadFromFile(getAssetPath() + "scenes/grasspatch_medium.gltf", vulkanDevice, queue, vkglTF::FileLoadingFlags::FlipY | vkglTF::FileLoadingFlags::PreTransformVertices);
 
 		const int fileLoadingFlags = vkglTF::FileLoadingFlags::FlipY | vkglTF::FileLoadingFlags::PreTransformVertices;
 
@@ -1146,7 +1140,6 @@ public:
 			treeModelInfo[i].name = treeTypes[i];
 			treeModelInfo[i].models.model.loadFromFile(getAssetPath() + "scenes/trees/" + treeTypes[i] + "/" + treeTypes[i] + ".gltf", vulkanDevice, queue, fileLoadingFlags);
 			treeModelInfo[i].models.imposter.loadFromFile(getAssetPath() + "scenes/trees/" + treeTypes[i] + "_imposter/" + treeTypes[i] + "_imposter.gltf", vulkanDevice, queue, fileLoadingFlags);
-			treeModelInfo[i].imposterScale = imposterScales[i];
 		}
 
 		grassModels.resize(grassTypes.size());
@@ -1154,7 +1147,6 @@ public:
 			grassModels[i].loadFromFile(getAssetPath() + "scenes/" + grassTypes[i] + ".gltf", vulkanDevice, queue, fileLoadingFlags);
 		}
 
-		//textures.skySphere.loadFromFile(getAssetPath() + "textures/skysphere2.ktx", VK_FORMAT_R8G8B8A8_UNORM, vulkanDevice, queue);
 		loadSkySphere(heightMapSettings.skySphere);
 		textures.waterNormalMap.loadFromFile(getAssetPath() + "textures/water_normal_rgba.ktx", VK_FORMAT_R8G8B8A8_UNORM, vulkanDevice, queue);
 		loadTerrainSet(heightMapSettings.terrainSet);
@@ -1607,7 +1599,7 @@ public:
 
 		// Sky
 		rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
-		rasterizationState.cullMode = VK_CULL_MODE_NONE;
+		rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
 		depthStencilState.depthWriteEnable = VK_FALSE;
 		pipelines.sky = new Pipeline(device);
 		pipelines.sky->setCreateInfo(pipelineCI);
@@ -1662,8 +1654,7 @@ public:
 		// Grass
 		pipelines.grass = new Pipeline(device);
 		pipelines.grass->setCreateInfo(pipelineCI);
-		pipelines.sky->setSampleCount(settings.multiSampling ? settings.sampleCount : VK_SAMPLE_COUNT_1_BIT);
-
+		pipelines.grass->setSampleCount(settings.multiSampling ? settings.sampleCount : VK_SAMPLE_COUNT_1_BIT);
 		pipelines.grass->setVertexInputState(&vertexInputStateModelInstanced);
 		pipelines.grass->setCache(pipelineCache);
 		pipelines.grass->setLayout(pipelineLayouts.tree);
@@ -1754,52 +1745,33 @@ public:
 		}
 	}
 
-	void updateUniformParams()
-	{
-		const uint32_t currentFrameIndex = getCurrentFrameIndex();
-		uniformDataParams.shadows = renderShadows;
-		uniformDataParams.fogColor = glm::vec4(heightMapSettings.fogColor[0], heightMapSettings.fogColor[1], heightMapSettings.fogColor[2], 1.0f);
-		uniformDataParams.waterColor = glm::vec4(heightMapSettings.waterColor[0], heightMapSettings.waterColor[1], heightMapSettings.waterColor[2], 1.0f);
-		uniformDataParams.grassColor = glm::vec4(heightMapSettings.grassColor[0], heightMapSettings.grassColor[1], heightMapSettings.grassColor[2], 1.0f);
-		memcpy(frameObjects[currentFrameIndex].uniformBuffers.params.mapped, &uniformDataParams, sizeof(UniformDataParams));
-	}
-
 	void updateUniformBuffers()
 	{
-		float radius = 50.0f;
-		lightPos = glm::vec4(20.0f, -15.0f, -15.0f, 0.0f) * radius;
-		lightPos = glm::vec4(-20.0f, -15.0f, -15.0f, 0.0f) * radius;
-		lightPos = glm::vec4(-20.0f, -15.0f, 20.0f, 0.0f) * radius;
-		// @todo
-		lightPos = glm::vec4(20.0f, -10.0f, 20.0f, 0.0f);
-		
-		lightPos = glm::vec4(-48.0f, -80.0f, 46.0f, 0.0f);
+		profiling.uniformUpdate.start();
 
-		//float angle = glm::radians(timer * 360.0f);
-		//lightPos = glm::vec4(cos(angle) * radius, -15.0f, sin(angle) * radius, 0.0f);
-		
+		const uint32_t currentFrameIndex = getCurrentFrameIndex();
+
+		// Shared UBO
+		lightPos = glm::vec4(-48.0f, -80.0f, 46.0f, 0.0f);
 		uboShared.lightDir = glm::normalize(-lightPos);
 		uboShared.projection = camera.matrices.perspective;
 		uboShared.model = camera.matrices.view;
 		uboShared.time = sin(glm::radians(timer * 360.0f));
 		uboShared.cameraPos = glm::vec4(camera.position, 0.0f);
-
-		const uint32_t currentFrameIndex = getCurrentFrameIndex();
-
-		// Mesh
 		memcpy(frameObjects[currentFrameIndex].uniformBuffers.shared.mapped, &uboShared, sizeof(uboShared));
 
-		updateUniformBufferCSM();
-	}
+		// Scene parameters
+		uniformDataParams.shadows = renderShadows;
+		uniformDataParams.fogColor = glm::vec4(heightMapSettings.fogColor[0], heightMapSettings.fogColor[1], heightMapSettings.fogColor[2], 1.0f);
+		uniformDataParams.waterColor = glm::vec4(heightMapSettings.waterColor[0], heightMapSettings.waterColor[1], heightMapSettings.waterColor[2], 1.0f);
+		uniformDataParams.grassColor = glm::vec4(heightMapSettings.grassColor[0], heightMapSettings.grassColor[1], heightMapSettings.grassColor[2], 1.0f);
+		memcpy(frameObjects[currentFrameIndex].uniformBuffers.params.mapped, &uniformDataParams, sizeof(UniformDataParams));
 
-	void updateUniformBufferCSM() {
-		const uint32_t currentFrameIndex = getCurrentFrameIndex();
-
+		// Shadow cascades
 		for (auto i = 0; i < cascades.size(); i++) {
 			depthPass.ubo.cascadeViewProjMat[i] = cascades[i].viewProjMatrix;
 		}
 		memcpy(frameObjects[currentFrameIndex].uniformBuffers.depthPass.mapped, &depthPass.ubo, sizeof(depthPass.ubo));
-
 		for (auto i = 0; i < cascades.size(); i++) {
 			uboCSM.cascadeSplits[i] = cascades[i].splitDepth;
 			uboCSM.cascadeViewProjMat[i] = cascades[i].viewProjMatrix;
@@ -1807,6 +1779,8 @@ public:
 		uboCSM.inverseViewMat = glm::inverse(camera.matrices.view);
 		uboCSM.lightDir = normalize(-lightPos);
 		memcpy(frameObjects[currentFrameIndex].uniformBuffers.CSM.mapped, &uboCSM, sizeof(uboCSM));
+
+		profiling.uniformUpdate.stop();
 	}
 
 	void prepare()
@@ -1833,19 +1807,20 @@ public:
 		prepareUniformBuffers();
 		createPipelines();
 		setupDescriptorSet();
-		loadHeightMapSettings("default");
+		loadHeightMapSettings("coastline");
 
 		prepared = true;
 	}
 
 	void buildCommandBuffer(CommandBuffer* commandBuffer)
 	{
+		profiling.cbBuild.start();
+
 		CommandBuffer* cb = commandBuffer;
 		cb->begin();
 
 		// CSM
 		if (renderShadows) {
-
 			// A single depth stencil attachment info can be used, but they can also be specified separately.
 			// When both are specified separately, the only requirement is that the image view is identical.			
 			VkRenderingAttachmentInfo depthStencilAttachment{};
@@ -1865,11 +1840,9 @@ public:
 			renderingInfo.viewMask = 0b00001111;
 
 			vks::tools::setImageLayout(cb->handle, depth.image->handle, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, SHADOW_MAP_CASCADE_COUNT });
-
 			vkCmdBeginRendering(cb->handle, &renderingInfo);
 			drawCSM(cb);
 			vkCmdEndRendering(cb->handle);
-
 			vks::tools::setImageLayout(cb->handle, depth.image->handle, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, SHADOW_MAP_CASCADE_COUNT });
 		}
 
@@ -1904,7 +1877,6 @@ public:
 		renderingInfo.pStencilAttachment = &depthStencilAttachment;
 
 		// Begin dynamic rendering
-
 		vks::tools::insertImageMemoryBarrier(
 			cb->handle,
 			offscreenPass.reflection.image->handle,
@@ -2126,6 +2098,8 @@ public:
 			VkImageSubresourceRange{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 });
 
 		cb->end();
+
+		profiling.cbBuild.stop();
 	}
 
 	void updateMemoryBudgets() {
@@ -2150,14 +2124,12 @@ public:
 
 		if (stickToTerrain) {
 			float h = 0.0f;
-			float r = 0.0f;
-			infiniteTerrain.getHeightAndRandomValue(camera.position, h, r);
+			infiniteTerrain.getHeight(camera.position, h);
 			camera.position.y = h - 3.0f;
 		}
 
 		updateCascades();
 		updateUniformBuffers();
-		updateUniformParams();
 		updateDrawBatches();
 
 		updateOverlay(getCurrentFrameIndex());
@@ -2209,6 +2181,8 @@ public:
 			ImGui::Text("Draw batch CPU: %.2f ms", profiling.drawBatchCpu.tDelta);
 			ImGui::Text("Draw batch upload: %.2f ms", profiling.drawBatchUpload.tDelta);
 			ImGui::Text("Draw batch total: %.2f ms", profiling.drawBatchUpdate.tDelta);
+			ImGui::Text("Uniform update: %.2f ms", profiling.uniformUpdate.tDelta);
+			ImGui::Text("Command buffer building: %.2f ms", profiling.cbBuild.tDelta);
 		}
 		ImGui::Text("Active threads: %d", activeThreadCount.load());
 		ImGui::End();
@@ -2251,10 +2225,11 @@ public:
 		ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiSetCond_FirstUseEver);
 		ImGui::SetNextWindowSize(ImVec2(0, 0), ImGuiSetCond_FirstUseEver);
 		ImGui::Begin("Render options", nullptr, ImGuiWindowFlags_None);
-		overlay->checkBox("Fog", &uniformDataParams.fog);
 		overlay->checkBox("Shadows", &renderShadows);
 		overlay->checkBox("Trees", &renderTrees);
 		overlay->checkBox("Grass", &renderGrass);
+		overlay->checkBox("Smooth coast line", &uniformDataParams.smoothCoastLine);
+		overlay->sliderFloat("Water alpha", &uniformDataParams.waterAlpha, 1.0f, 4096.0f);
 		if (overlay->sliderFloat("Chunk draw distance", &heightMapSettings.maxChunkDrawDistance, 0.0f, 1024.0f)) {
 			infiniteTerrain.updateViewDistance(heightMapSettings.maxChunkDrawDistance);
 		}
